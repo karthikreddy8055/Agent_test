@@ -5,7 +5,9 @@ from dotenv import load_dotenv
 import os
 from openai import OpenAI
 from groq import Groq
+from agent.memory import Memory
 
+memory = Memory()
 load_dotenv()
 
 # client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))

@@ -1,11 +1,8 @@
+from agent.memory import Memory
 
-from dotenv import load_dotenv
-import os
-from openai import OpenAI
+mem = Memory()
 
-load_dotenv()
+mem.add("IFRS9 is used for expected credit loss", "1")
+mem.add("ChromaDB is a vector database", "2")
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-models = client.models.list()
-for m in models.data:
-    print(m.id)
+print(mem.search("credit"))
