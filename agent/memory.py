@@ -1,19 +1,32 @@
 import chromadb
+import uuid
+
 
 class Memory:
     def __init__(self):
-        self.client = chromadb.Client()
-        self.collection = self.client.create_collection(name="agent_memory")
+        self.client = chromadb.PersistentClient(path="./chroma_db")
+        self.collection = self.client.get_or_create_collection(name="agent_memory")
 
-    def add(self, text, id):
+    def add(self, text, metadata=None):
         self.collection.add(
             documents=[text],
-            ids=[id]
+            metadatas=[metadata or {}],
+            ids=[str(uuid.uuid4())]
         )
 
-    def search(self, query, n_results=2):
-        results = self.collection.query(
+    def search(self, query, n_results=3):
+        return self.collection.query(
             query_texts=[query],
             n_results=n_results
         )
-        return results["documents"]
+
+    def get_all(self):
+        return self.collection.get()
+
+    def exists(self, text):
+        results = self.collection.query(
+            query_texts=[text],
+            n_results=1
+        )
+        docs = results.get("documents", [[]])[0]
+        return len(docs) > 0
