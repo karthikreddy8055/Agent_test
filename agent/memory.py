@@ -23,10 +23,25 @@ class Memory:
     def get_all(self):
         return self.collection.get()
 
+    
     def exists(self, text):
         results = self.collection.query(
             query_texts=[text],
             n_results=1
         )
+
         docs = results.get("documents", [[]])[0]
-        return len(docs) > 0
+        distances = results.get("distances", [[]])[0]
+
+        if not docs:
+            return False
+
+        # exact match
+        if docs[0].strip().lower() == text.strip().lower():
+            return True
+
+        # stricter semantic similarity
+        if distances and distances[0] < 0.15:
+            return True
+
+        return False
