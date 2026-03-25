@@ -92,9 +92,6 @@ Answer:
 def chat():
     print("Agent started. Type 'exit' to stop.\n")
     
-    
-   
-
     while True:
         user_input = input("You: ")
 
@@ -118,10 +115,43 @@ def chat():
             if portfolio_id:
                 result = analyze_portfolio(portfolio_id)
 
-                print("\nAgent (Tool Output):")
-                for k, v in result.items():
-                    print(f"{k}: {v}")
-                print()
+                tool_context = f"""
+                Portfolio Analysis Result:
+                Portfolio ID: {result['portfolio_id']}
+                Exposure: {result['exposure']}
+                Risk Level: {result['risk']}
+                Decision: {result['decision']}
+                """
+
+                prompt = f"""
+                You are a financial risk analyst.
+
+                Use the following tool output to explain the situation clearly in business terms.
+
+                {tool_context}
+
+                User Query:
+                {user_input}
+
+                Instructions:
+                - Be concise
+                - Use ONLY the provided tool output
+                - Do NOT assume or add external information
+                - Do NOT invent numbers or percentages
+                - Be concise and factual
+                - Explain risk and decision clearly based on given data only
+
+                Answer:
+                """
+
+                response = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+
+                answer = response.choices[0].message.content.strip()
+
+                print(f"\nAgent: {answer}\n")
 
                 continue
 
