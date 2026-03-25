@@ -126,6 +126,7 @@ def chat():
                 continue
 
 
+
         # 🔹 Retrieve memory
         results = memory.search(user_input)
         documents = results.get("documents", [[]])[0]
