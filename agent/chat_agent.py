@@ -4,6 +4,7 @@ from groq import Groq
 from agent.memory import Memory
 import uuid
 import json
+from agent.tools.risk_tools import analyze_portfolio
 
 load_dotenv()
 
@@ -91,15 +92,8 @@ Answer:
 def chat():
     print("Agent started. Type 'exit' to stop.\n")
     
-    memory.add(
-        text="IFRS9 is a financial reporting standard for expected credit loss",
-        metadata={"type": "concept"}
-    )
-
-    memory.add(
-        text="Credit risk is the risk of default by a borrower",
-        metadata={"type": "concept"}
-)
+    
+   
 
     while True:
         user_input = input("You: ")
@@ -107,6 +101,29 @@ def chat():
         if user_input.lower() == "exit":
             break
 
+        # 🔹 TOOL ROUTING (v1)
+
+        user_lower = user_input.lower()
+
+        if "portfolio" in user_lower:
+            # extract portfolio id (simple version)
+            words = user_input.split()
+            portfolio_id = None
+
+            for w in words:
+                if w.upper().startswith("PF"):
+                    portfolio_id = w
+                    break
+
+            if portfolio_id:
+                result = analyze_portfolio(portfolio_id)
+
+                print("\nAgent (Tool Output):")
+                for k, v in result.items():
+                    print(f"{k}: {v}")
+                print()
+
+                continue
 
 
         # 🔹 Retrieve memory
