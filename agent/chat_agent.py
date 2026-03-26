@@ -1,29 +1,41 @@
 from dotenv import load_dotenv
 import os
+import json
 from groq import Groq
 from agent.memory import Memory
-import uuid
-import json
-from agent.tools.risk_tools import analyze_portfolio
+from agent.tools.risk_tools import analyze_portfolio, calculate_var
 
 load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 memory = Memory()
+
+
+# -----------------------------
+# TOOL DECISION AGENT
+# -----------------------------
 def tool_decision_agent(user_input):
     prompt = f"""
-You are a tool routing agent.
+You are a strict tool routing agent.
 
 Available tools:
-1. analyze_portfolio(portfolio_id) → analyzes portfolio risk
+
+1. analyze_portfolio(portfolio_id)
+   → Use for: ANY portfolio-related query (risk, exposure, analysis)
+
+2. calculate_var(portfolio_id)
+   → Use for: VaR, value at risk, loss estimation
+
+STRICT RULES:
+- If a portfolio ID (e.g., PF123) is mentioned → ALWAYS use a tool
+- DO NOT answer using your own knowledge
+- DO NOT ask for more information
+- DO NOT make assumptions
+- If portfolio-related → use analyze_portfolio
+- If VaR-related → use calculate_var
 
 User Query:
 {user_input}
-
-Decide:
-- Should a tool be used?
-- If yes, which tool?
-- Extract required arguments
 
 Return STRICT JSON ONLY:
 
@@ -44,60 +56,23 @@ Return STRICT JSON ONLY:
     return response.choices[0].message.content.strip()
 
 
-def memory_agent(user_input, answer, existing_context):
-    prompt = f"""
-    You are a memory decision agent.
-
-    Your job is to decide whether the following information should be stored in long-term memory.
-
-    Existing Memory:
-    {existing_context}
-
-    New Information:
-    User Query: {user_input}
-    Agent Response: {answer}
-
-    Rules:
-    - Store ONLY core, generalizable concepts (definitions, key principles)
-    - Do NOT store expanded explanations if a simpler version already exists
-    - Do NOT store system-related or assistant capability descriptions
-    - Avoid storing multiple variations of the same concept
-    - Prefer the most concise version of knowledge
-    - ONLY store knowledge related to financial risk, credit risk, or financial concepts
-    - DO NOT store unrelated or conversational observations
-
-    If similar knowledge already exists, return store=false
-
-Return ONLY 1 short sentence if storing
-    Return STRICT JSON ONLY:
-    {{
-    "store": true or false,
-    "content": "clean summary if store is true"
-    }}
-    """
-    
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return response.choices[0].message.content.strip()
-
+# -----------------------------
+# CONTEXT DECISION AGENT
+# -----------------------------
 def context_decision_agent(user_input):
     prompt = f"""
 You are a context decision agent.
 
 Determine if the user query depends on previously discussed portfolio context.
 
-Examples of context-dependent queries:
+Context-dependent examples:
 - what is the risk
 - what should we do
-- tell me about it
+- tell me more about it
 
-Examples of general queries:
+General examples:
 - what is exposure definition
 - explain credit risk
-- what is inflation
 
 User Query:
 {user_input}
@@ -116,61 +91,200 @@ Return STRICT JSON:
 
     return response.choices[0].message.content.strip()
 
-def should_store(user_input, answer):
-    user_input = user_input.lower()
 
-    if user_input in ["hi", "hello", "hey"]:
-        return False
+# -----------------------------
+# CHAT LOOP
+# -----------------------------
+def chat():
+    print("Agent started. Type 'exit' to stop.\n")
+    chat_history = []
 
-    if len(answer) < 50:
-        return False
+    last_tool_result = None
 
-    if "thank" in user_input:
-        return False
+    while True:
+        try:
+            user_input = input("You: ")
+        except EOFError:
+            break
 
-    return True
+        if user_input.lower() == "exit":
+            break
 
+        user_lower = user_input.lower()
 
-def summarize_for_memory(answer):
-    return answer.split(".")[0]  # keep first sentence only
+        # =============================
+        # 🔹 0. HARD RULE: VaR TOOL
+        # =============================
+        if "var" in user_lower or "value at risk" in user_lower:
 
+            portfolio_id = None
+            words = user_input.split()
 
+            for w in words:
+                if w.lower().startswith("pf"):
+                    portfolio_id = w.upper()
+                    break
 
-def build_prompt(user_input, context):
-    return f"""
-You are a financial risk assistant.
+            # fallback to last known portfolio
+            if not portfolio_id and last_tool_result:
+                portfolio_id = last_tool_result["portfolio_id"]
 
-Context (use only if relevant):
-{context}
+            if portfolio_id:
+                result = calculate_var(portfolio_id)
+
+                tool_context = f"""
+VaR Result:
+Portfolio ID: {result['portfolio_id']}
+VaR (95%): {result['var_95']}
+Confidence: {result['confidence']}
+"""
+
+                prompt = f"""
+You are a financial risk analyst.
+
+Use ONLY the following tool output:
+
+{tool_context}
 
 User Query:
 {user_input}
 
 Instructions:
-- Be precise
-- Use business language
-- Ignore irrelevant context
+- Do NOT assume anything beyond this data
+- Be concise
 
 Answer:
 """
 
+                response = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages = [{"role": "user", "content": prompt}]
+                )
 
-def chat():
-    print("Agent started. Type 'exit' to stop.\n")
-    last_tool_result = None
-    while True:
-        user_input = input("You: ")
+                answer = response.choices[0].message.content.strip()
+                print(f"\nAgent: {answer}\n")
+                chat_history.append({"role": "user", "content": user_input})
+                chat_history.append({"role": "assistant", "content": answer})
+                continue
 
-        if user_input.lower() == "exit":
-            break
+        # =============================
+        # 🔹 1. TOOL DECISION (LLM)
+        # =============================
+        decision_raw = tool_decision_agent(user_input)
 
-        # 🔹 TOOL ROUTING (v1)
+        try:
+            decision = json.loads(decision_raw)
+        except:
+            decision = {"use_tool": False}
 
-        
-       
-        # 🔹 SESSION MEMORY CHECK
-        
+        # =============================
+        # 🔹 2. FALLBACK GUARDRAIL
+        # =============================
+        if not decision.get("use_tool"):
 
+            if "pf" in user_lower:
+                decision["use_tool"] = True
+
+                if "var" in user_lower:
+                    decision["tool"] = "calculate_var"
+                else:
+                    decision["tool"] = "analyze_portfolio"
+
+                words = user_input.split()
+                for w in words:
+                    if w.lower().startswith("pf"):
+                        decision["arguments"] = {"portfolio_id": w.upper()}
+                        break
+
+        # =============================
+        # 🔹 3. TOOL EXECUTION
+        # =============================
+        if decision.get("use_tool"):
+            tool = decision.get("tool")
+            args = decision.get("arguments", {})
+
+            portfolio_id = args.get("portfolio_id")
+
+            if portfolio_id:
+                portfolio_id = portfolio_id.upper()
+
+            # -------- analyze_portfolio --------
+            if tool == "analyze_portfolio" and portfolio_id:
+                result = analyze_portfolio(portfolio_id)
+                last_tool_result = result
+
+                tool_context = f"""
+Portfolio Analysis Result:
+Portfolio ID: {result['portfolio_id']}
+Exposure: {result['exposure']}
+Risk Level: {result['risk']}
+Decision: {result['decision']}
+"""
+
+                prompt = f"""
+You are a financial risk analyst.
+
+Use ONLY the following tool output:
+
+{tool_context}
+
+User Query:
+{user_input}
+
+Instructions:
+- Use ONLY provided data
+- Do NOT add assumptions
+- Be concise and business-focused
+
+Answer:
+"""
+
+            # -------- calculate_var --------
+            elif tool == "calculate_var" and portfolio_id:
+                result = calculate_var(portfolio_id)
+
+                tool_context = f"""
+VaR Result:
+Portfolio ID: {result['portfolio_id']}
+VaR (95%): {result['var_95']}
+Confidence: {result['confidence']}
+"""
+
+                prompt = f"""
+You are a financial risk analyst.
+
+Use ONLY the following tool output:
+
+{tool_context}
+
+User Query:
+{user_input}
+
+Instructions:
+- Do NOT assume anything beyond this data
+- Be concise
+
+Answer:
+"""
+
+            else:
+                prompt = None
+
+            if prompt:
+                response = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages = [{"role": "user", "content": prompt}]
+                )
+
+                answer = response.choices[0].message.content.strip()
+                print(f"\nAgent: {answer}\n")
+                chat_history.append({"role": "user", "content": user_input})
+                chat_history.append({"role": "assistant", "content": answer})
+                continue
+
+        # =============================
+        # 🔹 4. SESSION MEMORY
+        # =============================
         use_context = False
 
         if last_tool_result:
@@ -185,201 +299,76 @@ def chat():
         if last_tool_result and use_context:
 
             tool_context = f"""
-        Portfolio Analysis Result:
-        Portfolio ID: {last_tool_result['portfolio_id']}
-        Exposure: {last_tool_result['exposure']}
-        Risk Level: {last_tool_result['risk']}
-        Decision: {last_tool_result['decision']}
-        """
+Portfolio Analysis Result:
+Portfolio ID: {last_tool_result['portfolio_id']}
+Exposure: {last_tool_result['exposure']}
+Risk Level: {last_tool_result['risk']}
+Decision: {last_tool_result['decision']}
+"""
 
             prompt = f"""
-        You are a financial risk analyst.
+You are a financial risk analyst.
 
-        Use ONLY the following previously known information:
+Use ONLY the following previously known information:
 
-        {tool_context}
+{tool_context}
 
-        User Query:
-        {user_input}
+User Query:
+{user_input}
 
-        Instructions:
-        - Use ONLY the provided portfolio information
-        - Answer specifically for this portfolio
-        - Do NOT give generic definitions
-        - Do NOT add external explanations
-        - Do NOT assume or invent any data
-        - Be concise
+Instructions:
+- Use ONLY the provided portfolio information
+- Answer specifically for this portfolio
+- Do NOT give generic definitions
+- Do NOT add external explanations
+- Do NOT assume or invent any data
+- Do NOT derive or calculate new values
+- Be concise
 
-        Answer:
-        """
+Answer:
+"""
 
             response = client.chat.completions.create(
                 model="llama-3.1-8b-instant",
-                messages=[{"role": "user", "content": prompt}]
+                messages = [{"role": "user", "content": prompt}]
             )
 
             answer = response.choices[0].message.content.strip()
-
             print(f"\nAgent: {answer}\n")
-
+            chat_history.append({"role": "user", "content": user_input})
+            chat_history.append({"role": "assistant", "content": answer})
             continue
-        decision_raw = tool_decision_agent(user_input)
 
-        try:
-            decision = json.loads(decision_raw)
-        except:
-            decision = {"use_tool": False}
+        # =============================
+        # 🔹 5. SAFE DEFAULT LLM
+        # =============================
+        prompt = f"""
+You are a financial assistant.
 
-        if decision.get("use_tool"):
-            tool = decision.get("tool")
-            args = decision.get("arguments", {})
+User Query:
+{user_input}
 
-            if tool == "analyze_portfolio":
-                portfolio_id = args.get("portfolio_id")
+Instructions:
+- If unsure, ask for clarification
+- Do NOT make assumptions
+- Do NOT fabricate financial analysis
 
-                if portfolio_id:
-                    result = analyze_portfolio(portfolio_id)
-                    last_tool_result = result
+Answer:
+"""
 
-                    tool_context = f"""
-        Portfolio Analysis Result:
-        Portfolio ID: {result['portfolio_id']}
-        Exposure: {result['exposure']}
-        Risk Level: {result['risk']}
-        Decision: {result['decision']}
-        """
-
-                    prompt = f"""
-        You are a financial risk analyst.
-
-        Use ONLY the following tool output:
-
-        {tool_context}
-
-        User Query:
-        {user_input}
-
-        Instructions:
-        - Do NOT add assumptions
-        - Do NOT invent numbers
-        - Be concise and factual
-
-        Answer:
-        """
-
-                    response = client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-
-                    answer = response.choices[0].message.content.strip()
-
-                    print(f"\nAgent: {answer}\n")
-
-                    continue
-
-        # if "portfolio" in user_lower:
-        #     # extract portfolio id (simple version)
-        #     words = user_input.split()
-        #     portfolio_id = None
-
-        #     for w in words:
-        #         if w.upper().startswith("PF"):
-        #             portfolio_id = w
-        #             break
-
-        #     if portfolio_id:
-        #         result = analyze_portfolio(portfolio_id)
-
-        #         tool_context = f"""
-        #         Portfolio Analysis Result:
-        #         Portfolio ID: {result['portfolio_id']}
-        #         Exposure: {result['exposure']}
-        #         Risk Level: {result['risk']}
-        #         Decision: {result['decision']}
-        #         """
-
-        #         prompt = f"""
-        #         You are a financial risk analyst.
-
-        #         Use the following tool output to explain the situation clearly in business terms.
-
-        #         {tool_context}
-
-        #         User Query:
-        #         {user_input}
-
-        #         Instructions:
-        #         - Be concise
-        #         - Use ONLY the provided tool output
-        #         - Do NOT assume or add external information
-        #         - Do NOT invent numbers or percentages
-        #         - Be concise and factual
-        #         - Explain risk and decision clearly based on given data only
-
-        #         Answer:
-        #         """
-
-        #         response = client.chat.completions.create(
-        #             model="llama-3.1-8b-instant",
-        #             messages=[{"role": "user", "content": prompt}]
-        #         )
-
-        #         answer = response.choices[0].message.content.strip()
-
-        #         print(f"\nAgent: {answer}\n")
-
-        #         continue
-
-
-
-        # 🔹 Retrieve memory
-        results = memory.search(user_input)
-        documents = results.get("documents", [[]])[0]
-        distances = results.get("distances", [[]])[0]
-
-        filtered_docs = []
-
-        for doc, dist in zip(documents, distances):
-            if dist < 1.2:  # threshold (tune later)
-                filtered_docs.append(doc)
-        filtered_docs = filtered_docs[:2]
-        context = "\n".join(filtered_docs) if filtered_docs else "No relevant past information"
-
-
-        # 🔹 Build prompt
-        prompt = build_prompt(user_input, context)
-
-        # 🔹 LLM call
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}]
+            messages = chat_history + [{"role": "user", "content": prompt}]
         )
 
         answer = response.choices[0].message.content.strip()
-
         print(f"\nAgent: {answer}\n")
-
-        # 🔹 Store interaction
-        
-    
-        decision_raw = memory_agent(user_input, answer, context)
-
-        try:
-            decision = json.loads(decision_raw)
-        except:
-            decision = {"store": False}
-
-        if decision.get("store"):
-            content = decision.get("content", "").strip()
-
-            if content and not memory.exists(content):
-                memory.add(
-                    text=content,
-                    metadata={"type": "concept"}
-                )
+        chat_history.append({"role": "user", "content": user_input})
+        chat_history.append({"role": "assistant", "content": answer})
 
 
-
+# -----------------------------
+# RUN
+# -----------------------------
 if __name__ == "__main__":
     chat()

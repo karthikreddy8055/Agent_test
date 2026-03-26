@@ -16,3 +16,12 @@ def analyze_portfolio(portfolio_id):
         "risk": risk,
         "decision": decision
     }
+def calculate_var(portfolio_id):
+    # simulate VaR calculation
+    var_95 = 250000  # dummy value
+
+    return {
+        "portfolio_id": portfolio_id,
+        "var_95": var_95,
+        "confidence": "95%"
+    }
