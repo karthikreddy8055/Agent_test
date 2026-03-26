@@ -83,6 +83,38 @@ Return ONLY 1 short sentence if storing
 
     return response.choices[0].message.content.strip()
 
+def context_decision_agent(user_input):
+    prompt = f"""
+You are a context decision agent.
+
+Determine if the user query depends on previously discussed portfolio context.
+
+Examples of context-dependent queries:
+- what is the risk
+- what should we do
+- tell me about it
+
+Examples of general queries:
+- what is exposure definition
+- explain credit risk
+- what is inflation
+
+User Query:
+{user_input}
+
+Return STRICT JSON:
+
+{{
+  "use_context": true/false
+}}
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message.content.strip()
 
 def should_store(user_input, answer):
     user_input = user_input.lower()
@@ -125,7 +157,7 @@ Answer:
 
 def chat():
     print("Agent started. Type 'exit' to stop.\n")
-    
+    last_tool_result = None
     while True:
         user_input = input("You: ")
 
@@ -134,9 +166,63 @@ def chat():
 
         # 🔹 TOOL ROUTING (v1)
 
-        # user_lower = user_input.lower()
+        
+       
+        # 🔹 SESSION MEMORY CHECK
         
 
+        use_context = False
+
+        if last_tool_result:
+            decision_raw = context_decision_agent(user_input)
+
+            try:
+                decision = json.loads(decision_raw)
+                use_context = decision.get("use_context", False)
+            except:
+                use_context = False
+
+        if last_tool_result and use_context:
+
+            tool_context = f"""
+        Portfolio Analysis Result:
+        Portfolio ID: {last_tool_result['portfolio_id']}
+        Exposure: {last_tool_result['exposure']}
+        Risk Level: {last_tool_result['risk']}
+        Decision: {last_tool_result['decision']}
+        """
+
+            prompt = f"""
+        You are a financial risk analyst.
+
+        Use ONLY the following previously known information:
+
+        {tool_context}
+
+        User Query:
+        {user_input}
+
+        Instructions:
+        - Use ONLY the provided portfolio information
+        - Answer specifically for this portfolio
+        - Do NOT give generic definitions
+        - Do NOT add external explanations
+        - Do NOT assume or invent any data
+        - Be concise
+
+        Answer:
+        """
+
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            answer = response.choices[0].message.content.strip()
+
+            print(f"\nAgent: {answer}\n")
+
+            continue
         decision_raw = tool_decision_agent(user_input)
 
         try:
@@ -153,6 +239,7 @@ def chat():
 
                 if portfolio_id:
                     result = analyze_portfolio(portfolio_id)
+                    last_tool_result = result
 
                     tool_context = f"""
         Portfolio Analysis Result:
