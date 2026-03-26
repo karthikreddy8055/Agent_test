@@ -10,6 +10,40 @@ load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 memory = Memory()
+def tool_decision_agent(user_input):
+    prompt = f"""
+You are a tool routing agent.
+
+Available tools:
+1. analyze_portfolio(portfolio_id) → analyzes portfolio risk
+
+User Query:
+{user_input}
+
+Decide:
+- Should a tool be used?
+- If yes, which tool?
+- Extract required arguments
+
+Return STRICT JSON ONLY:
+
+{{
+  "use_tool": true/false,
+  "tool": "tool_name or null",
+  "arguments": {{
+    "portfolio_id": "value if applicable"
+  }}
+}}
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message.content.strip()
+
+
 def memory_agent(user_input, answer, existing_context):
     prompt = f"""
     You are a memory decision agent.
@@ -100,60 +134,115 @@ def chat():
 
         # 🔹 TOOL ROUTING (v1)
 
-        user_lower = user_input.lower()
+        # user_lower = user_input.lower()
+        
 
-        if "portfolio" in user_lower:
-            # extract portfolio id (simple version)
-            words = user_input.split()
-            portfolio_id = None
+        decision_raw = tool_decision_agent(user_input)
 
-            for w in words:
-                if w.upper().startswith("PF"):
-                    portfolio_id = w
-                    break
+        try:
+            decision = json.loads(decision_raw)
+        except:
+            decision = {"use_tool": False}
 
-            if portfolio_id:
-                result = analyze_portfolio(portfolio_id)
+        if decision.get("use_tool"):
+            tool = decision.get("tool")
+            args = decision.get("arguments", {})
 
-                tool_context = f"""
-                Portfolio Analysis Result:
-                Portfolio ID: {result['portfolio_id']}
-                Exposure: {result['exposure']}
-                Risk Level: {result['risk']}
-                Decision: {result['decision']}
-                """
+            if tool == "analyze_portfolio":
+                portfolio_id = args.get("portfolio_id")
 
-                prompt = f"""
-                You are a financial risk analyst.
+                if portfolio_id:
+                    result = analyze_portfolio(portfolio_id)
 
-                Use the following tool output to explain the situation clearly in business terms.
+                    tool_context = f"""
+        Portfolio Analysis Result:
+        Portfolio ID: {result['portfolio_id']}
+        Exposure: {result['exposure']}
+        Risk Level: {result['risk']}
+        Decision: {result['decision']}
+        """
 
-                {tool_context}
+                    prompt = f"""
+        You are a financial risk analyst.
 
-                User Query:
-                {user_input}
+        Use ONLY the following tool output:
 
-                Instructions:
-                - Be concise
-                - Use ONLY the provided tool output
-                - Do NOT assume or add external information
-                - Do NOT invent numbers or percentages
-                - Be concise and factual
-                - Explain risk and decision clearly based on given data only
+        {tool_context}
 
-                Answer:
-                """
+        User Query:
+        {user_input}
 
-                response = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
-                    messages=[{"role": "user", "content": prompt}]
-                )
+        Instructions:
+        - Do NOT add assumptions
+        - Do NOT invent numbers
+        - Be concise and factual
 
-                answer = response.choices[0].message.content.strip()
+        Answer:
+        """
 
-                print(f"\nAgent: {answer}\n")
+                    response = client.chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        messages=[{"role": "user", "content": prompt}]
+                    )
 
-                continue
+                    answer = response.choices[0].message.content.strip()
+
+                    print(f"\nAgent: {answer}\n")
+
+                    continue
+
+        # if "portfolio" in user_lower:
+        #     # extract portfolio id (simple version)
+        #     words = user_input.split()
+        #     portfolio_id = None
+
+        #     for w in words:
+        #         if w.upper().startswith("PF"):
+        #             portfolio_id = w
+        #             break
+
+        #     if portfolio_id:
+        #         result = analyze_portfolio(portfolio_id)
+
+        #         tool_context = f"""
+        #         Portfolio Analysis Result:
+        #         Portfolio ID: {result['portfolio_id']}
+        #         Exposure: {result['exposure']}
+        #         Risk Level: {result['risk']}
+        #         Decision: {result['decision']}
+        #         """
+
+        #         prompt = f"""
+        #         You are a financial risk analyst.
+
+        #         Use the following tool output to explain the situation clearly in business terms.
+
+        #         {tool_context}
+
+        #         User Query:
+        #         {user_input}
+
+        #         Instructions:
+        #         - Be concise
+        #         - Use ONLY the provided tool output
+        #         - Do NOT assume or add external information
+        #         - Do NOT invent numbers or percentages
+        #         - Be concise and factual
+        #         - Explain risk and decision clearly based on given data only
+
+        #         Answer:
+        #         """
+
+        #         response = client.chat.completions.create(
+        #             model="llama-3.1-8b-instant",
+        #             messages=[{"role": "user", "content": prompt}]
+        #         )
+
+        #         answer = response.choices[0].message.content.strip()
+
+        #         print(f"\nAgent: {answer}\n")
+
+        #         continue
 
 
 
