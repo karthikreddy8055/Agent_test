@@ -9,6 +9,7 @@ load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 memory = Memory()
+last_tool_result_global = None
 
 
 # -----------------------------
@@ -46,6 +47,215 @@ Return STRICT JSON ONLY:
     "portfolio_id": "value if applicable"
   }}
 }}
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def process_input(user_input):
+    global last_tool_result_global
+
+    user_lower = user_input.lower()
+
+    # =============================
+    # 🔹 0. HARD RULE: VaR TOOL
+    # =============================
+    if "var" in user_lower or "value at risk" in user_lower:
+
+        portfolio_id = None
+        words = user_input.split()
+
+        for w in words:
+            if w.lower().startswith("pf"):
+                portfolio_id = w.upper()
+                break
+
+        if not portfolio_id and last_tool_result_global:
+            portfolio_id = last_tool_result_global["portfolio_id"]
+
+        if portfolio_id:
+            result = calculate_var(portfolio_id)
+
+            tool_context = f"""
+VaR Result:
+Portfolio ID: {result['portfolio_id']}
+VaR (95%): {result['var_95']}
+Confidence: {result['confidence']}
+"""
+
+            prompt = f"""
+You are a financial risk analyst.
+
+Use ONLY the following tool output:
+
+{tool_context}
+
+User Query:
+{user_input}
+
+Instructions:
+- Do NOT assume anything beyond this data
+- Be concise
+
+Answer:
+"""
+
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            return response.choices[0].message.content.strip()
+
+    # =============================
+    # 🔹 1. TOOL DECISION
+    # =============================
+    decision_raw = tool_decision_agent(user_input)
+
+    try:
+        decision = json.loads(decision_raw)
+    except:
+        decision = {"use_tool": False}
+
+    # =============================
+    # 🔹 2. FALLBACK GUARDRAIL
+    # =============================
+    if not decision.get("use_tool"):
+
+        if "pf" in user_lower:
+            decision["use_tool"] = True
+
+            if "var" in user_lower:
+                decision["tool"] = "calculate_var"
+            else:
+                decision["tool"] = "analyze_portfolio"
+
+            for w in user_input.split():
+                if w.lower().startswith("pf"):
+                    decision["arguments"] = {"portfolio_id": w.upper()}
+                    break
+
+    # =============================
+    # 🔹 3. TOOL EXECUTION
+    # =============================
+    if decision.get("use_tool"):
+        tool = decision.get("tool")
+        args = decision.get("arguments", {})
+
+        portfolio_id = args.get("portfolio_id")
+
+        if portfolio_id:
+            portfolio_id = portfolio_id.upper()
+
+        if tool == "analyze_portfolio" and portfolio_id:
+            result = analyze_portfolio(portfolio_id)
+            last_tool_result_global = result
+
+            tool_context = f"""
+Portfolio Analysis Result:
+Portfolio ID: {result['portfolio_id']}
+Exposure: {result['exposure']}
+Risk Level: {result['risk']}
+Decision: {result['decision']}
+"""
+
+        elif tool == "calculate_var" and portfolio_id:
+            result = calculate_var(portfolio_id)
+
+            tool_context = f"""
+VaR Result:
+Portfolio ID: {result['portfolio_id']}
+VaR (95%): {result['var_95']}
+Confidence: {result['confidence']}
+"""
+
+        else:
+            tool_context = None
+
+        if tool_context:
+            prompt = f"""
+You are a financial risk analyst.
+
+Use ONLY the following tool output:
+
+{tool_context}
+
+User Query:
+{user_input}
+
+Instructions:
+- Use ONLY provided data
+- Do NOT add assumptions
+- Be concise and business-focused
+
+Answer:
+"""
+
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            return response.choices[0].message.content.strip()
+
+    # =============================
+    # 🔹 4. SESSION MEMORY
+    # =============================
+    if last_tool_result_global:
+
+        tool_context = f"""
+Portfolio Analysis Result:
+Portfolio ID: {last_tool_result_global['portfolio_id']}
+Exposure: {last_tool_result_global['exposure']}
+Risk Level: {last_tool_result_global['risk']}
+Decision: {last_tool_result_global['decision']}
+"""
+
+        prompt = f"""
+You are a financial risk analyst.
+
+Use ONLY the following previously known information:
+
+{tool_context}
+
+User Query:
+{user_input}
+
+Instructions:
+- Use ONLY the provided portfolio information
+- Do NOT give generic definitions
+- Do NOT assume or invent data
+- Be concise
+
+Answer:
+"""
+
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        return response.choices[0].message.content.strip()
+
+    # =============================
+    # 🔹 5. SAFE DEFAULT
+    # =============================
+    prompt = f"""
+You are a financial assistant.
+
+User Query:
+{user_input}
+
+Instructions:
+- If unsure, ask for clarification
+- Do NOT make assumptions
+
+Answer:
 """
 
     response = client.chat.completions.create(
